@@ -17,9 +17,11 @@ Firmware single-file para **ESP32-S3**, portado desde la versión estable WROOM.
 | Historial de eventos (50 entradas) | ✅ Funcionando |
 | Modo Provisioning (AP captive portal) | ✅ Funcionando |
 | Persistencia NVS (configuración survives power-off) | ✅ Funcionando |
+| Restauración de estado GPIO tras power-off | ✅ Funcionando |
 | IP estática configurable | ✅ Funcionando |
 | MQTT (broker externo, pub/sub) | ✅ Funcionando |
-| Relay WebSocket P2P (WebSocketsClient) | ✅ Implementado |
+| Relay WebSocket P2P (WebSocketsClient) | ✅ Funcionando |
+| OTA por navegador (Update.h) | ✅ Funcionando |
 | QR P2P estilo Dahua | 🔜 Próxima versión |
 
 ---
@@ -73,10 +75,12 @@ Firmware single-file para **ESP32-S3**, portado desde la versión estable WROOM.
 ```
 Board:              ESP32S3 Dev Module
 Flash Size:         4MB
-Partition Scheme:   Huge APP (3MB No OTA)
+Partition Scheme:   Minimal SPIFFS (1.9MB APP with OTA / 128KB SPIFFS)
 USB CDC On Boot:    Enabled
 Upload Speed:       921600
 ```
+
+> ⚠️ El esquema de partición **Minimal SPIFFS** es obligatorio para OTA. Con **Huge APP** no compila.
 
 ---
 
@@ -89,6 +93,8 @@ Instalar desde **Tools → Manage Libraries**:
 | WebSockets | Markus Sattler |
 | ArduinoJson | Benoit Blanchon (v7) |
 | PubSubClient | Nick O'Leary |
+
+`Update.h` viene incluida en el SDK del ESP32 — no requiere instalación adicional.
 
 ---
 
@@ -112,7 +118,7 @@ Instalar desde **Tools → Manage Libraries**:
 Desde el Serial Monitor (cualquier velocidad) escribir la letra **`r`**  
 O mantener presionado el botón **BOOT (GPIO 0)** durante **3 segundos**.
 
-Esto borra toda la NVS: WiFi, usuarios, scheduler, MQTT, Relay.
+Esto borra toda la NVS: WiFi, usuarios, scheduler, MQTT, Relay y estado de GPIOs.
 
 ---
 
@@ -128,11 +134,78 @@ Todo lo siguiente sobrevive a cortes de energía:
 - Configuración Relay (host, puerto, token, TLS)
 - IP estática y configuración de red
 - Timezone
+- **Estado físico de los GPIOs** — modo, valor (HIGH/LOW o duty cycle) y frecuencia PWM
 
-Lo que **no** persiste (reinicia al encender):
+Lo que **no** persiste:
 
-- Estado físico de los GPIOs (todos arrancan en el modo configurado pero con valor 0)
-- Sesiones de usuario (requiere login de nuevo)
+- Sesiones de usuario — los tokens expiran al reiniciar, requiere login de nuevo
+
+---
+
+## Restauración de estado GPIO
+
+Al encender, el firmware restaura automáticamente el estado físico de cada pin tal como estaba antes del apagado.
+
+El estado se guarda en el namespace NVS `gpiostate` cada vez que ocurre un cambio desde cualquier origen:
+
+| Origen del cambio | Se guarda |
+|-------------------|-----------|
+| UI web (toggle, slider PWM) | ✓ |
+| API REST (digital / pwm / freq / mode) | ✓ |
+| Scheduler NTP | ✓ |
+| Relay WebSocket | ✓ |
+
+Al arrancar, `restoreGPIOState()` aplica físicamente:
+
+| Modo guardado | Acción al arrancar |
+|---------------|--------------------|
+| OUTPUT HIGH | `pinMode OUTPUT` + `digitalWrite HIGH` |
+| OUTPUT LOW | `pinMode OUTPUT` + `digitalWrite LOW` |
+| PWM | `ledcAttach` + `ledcWrite` con duty y freq guardados |
+| INPUT | `pinMode INPUT` |
+| ADC | `pinMode INPUT` + `analogSetPinAttenuation` |
+| NONE | Sin acción — pin no tocado |
+
+---
+
+## OTA — Actualización por navegador
+
+Permite actualizar el firmware sin cable USB enviando el `.bin` directamente desde el navegador.
+
+### Cómo generar el .bin
+
+```
+Arduino IDE → Sketch → Export Compiled Binary
+```
+
+El archivo `.bin` se genera en la misma carpeta del proyecto.
+
+### Cómo actualizar
+
+1. Abrir `http://<IP>` → login como **admin**
+2. Tab **Admin** → botón **ACTUALIZAR FIRMWARE**  
+   (o directamente en el tab **OTA**)
+3. Seleccionar el archivo `.bin`
+4. Presionar **SUBIR FIRMWARE**
+5. Barra de progreso en tiempo real
+6. El dispositivo reinicia automáticamente al completar
+7. Reconectar al mismo IP después del reinicio (~5 segundos)
+
+### Cómo funciona internamente
+
+```
+Navegador  ──POST /update (.bin)──►  ESP32-S3
+                                       │
+                                       ├─ Update.begin()
+                                       ├─ Update.write() x chunks
+                                       ├─ Update.end()  ← verifica checksum
+                                       ├─ server.send(200)
+                                       └─ ESP.restart() → arranca con nuevo firmware
+```
+
+El ESP32-S3 tiene dos particiones de app en flash (esquema Minimal SPIFFS). La actualización escribe en la partición inactiva. Si falla en cualquier punto, la partición activa anterior sigue intacta.
+
+El endpoint `POST /update` requiere autenticación con header `X-Token` y rol **admin**.
 
 ---
 
@@ -142,19 +215,19 @@ Lo que **no** persiste (reinicia al encender):
 Control en tiempo real de los 22 pines. Cada tarjeta muestra el modo actual, valor, nombre personalizable y sparkline de historial. Modos disponibles según el pin: OUTPUT, INPUT, PWM, ADC.
 
 ### Scheduler
-Hasta 20 eventos programados con sincronización NTP. Cada evento define: pin, acción (on/off/pwm), hora, minuto y días de semana activos. Funciona sin conexión a internet si el NTP ya sincronizó.
+Hasta 20 eventos programados con sincronización NTP. Cada evento define: pin, acción (on/off/pwm), hora, minuto y días de semana activos.
 
 ### Historial
-Registro de los últimos 50 cambios de estado con timestamp, pin, modo, valor y usuario que realizó el cambio.
+Registro de los últimos 50 cambios de estado con timestamp, pin, modo, valor y usuario.
 
 ### Admin
-Gestión de usuarios (hasta 5), cambio de contraseña, información del dispositivo y acceso a las configuraciones avanzadas (Red, MQTT, Relay).
+Gestión de usuarios (hasta 5), cambio de contraseña, información del dispositivo y acceso a Red, MQTT, Relay y OTA.
 
 ### Red *(oculto hasta login admin)*
-Configuración de IP estática o DHCP, gateway, máscara y DNS primario/secundario.
+Configuración de IP estática o DHCP, gateway, máscara y DNS.
 
 ### MQTT *(oculto hasta login admin)*
-Conexión a broker MQTT externo. Parámetros: host, puerto, clientId, usuario, contraseña, keepAlive, QoS, prefijo de topics, TLS. Publicación automática de estado y historial.
+Conexión a broker MQTT externo con pub/sub de estado e historial.
 
 Topics publicados:
 ```
@@ -170,11 +243,14 @@ Topics suscritos:
 <prefix>/pin/+/mode
 ```
 
+### OTA *(oculto hasta login admin)*
+Actualización de firmware por navegador sin cable USB.
+
 ---
 
 ## API REST
 
-Todos los endpoints requieren autenticación via header `X-Token` excepto `/api/login`.
+Todos los endpoints requieren header `X-Token` excepto `/api/login`.
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
@@ -188,7 +264,7 @@ Todos los endpoints requieren autenticación via header `X-Token` excepto `/api/
 | GET/POST | `/api/schedule` | Leer / crear eventos scheduler |
 | DELETE | `/api/schedule/<id>` | Eliminar evento |
 | GET/POST | `/api/users` | Leer / crear usuarios |
-| DELETE | `/api/users/<name>` | Eliminar usuario |
+| DELETE | `/api/users/<n>` | Eliminar usuario |
 | GET/POST | `/api/wifi/scan` | Escanear redes WiFi |
 | POST | `/api/wifi/connect` | Conectar a red |
 | GET | `/api/wifi/status` | Estado WiFi |
@@ -199,27 +275,21 @@ Todos los endpoints requieren autenticación via header `X-Token` excepto `/api/
 | POST | `/api/relay/connect` | Conectar Relay manualmente |
 | POST | `/api/relay/disconnect` | Desconectar Relay |
 | GET/POST | `/api/p2p/config` | Configuración P2P |
+| POST | `/update` | Subir firmware OTA (.bin) |
 
 ---
 
 ## Módulo Relay (WebSocket P2P)
 
-El firmware incluye un cliente WebSocket que se conecta a un servidor relay externo para permitir control remoto fuera de la red local.
+Cada dispositivo genera un **Device ID único** basado en su MAC. El servidor relay puede ser el `relay.js` del proyecto, desplegado en VPS o Railway.
 
-Cada dispositivo genera un **Device ID único** basado en su MAC:
-```
-<prefix_hex><suffix_hex>   →  ej. A1B2C3D4E5F6...
-```
-
-El servidor relay puede ser el `relay.js` desarrollado para este proyecto, desplegado en VPS, Railway o GitHub Codespaces.
-
-Flujo de conexión:
+Flujo:
 ```
 ESP32-S3  ──WebSocket──►  Relay Server  ◄──WebSocket──  App / Browser
               path: /ws?id=<deviceId>&role=device
 ```
 
-Comandos que acepta el relay desde la app:
+Comandos aceptados:
 ```json
 { "cmd": "on",  "pin": 0 }
 { "cmd": "off", "pin": 0 }
@@ -231,17 +301,11 @@ Comandos que acepta el relay desde la app:
 
 ## Modo DEBUG
 
-Para desarrollo sin necesidad de provisioning:
-
 ```cpp
 #define DEBUG_MODE 1
 ```
 
-En modo DEBUG:
-- El ESP32 levanta el AP directamente sin pedir configuración
-- El login está deshabilitado (token fijo `DEBUG_ADMIN_TOKEN`)
-- No se lee ni escribe NVS
-- Acceso directo en `http://192.168.4.1`
+AP directo sin provisioning, login deshabilitado, sin NVS. Acceso en `http://192.168.4.1`.
 
 ---
 
@@ -261,36 +325,60 @@ En modo DEBUG:
 
 ---
 
-## Arquitectura del firmware
+## Namespaces NVS
 
-El firmware corre en el loop principal de Arduino **sin FreeRTOS**, siguiendo el mismo patrón del WROOM original que funciona de forma estable:
+| Namespace | Contenido |
+|-----------|-----------|
+| `cfg` | WiFi, usuarios, timezone |
+| `names` | Nombres personalizados de pines |
+| `sched` | Eventos del scheduler |
+| `gpiostate` | Modo, valor y frecuencia de cada GPIO |
+| `mqttcfg` | Configuración MQTT completa |
+| `netcfg` | IP estática, gateway, DNS |
+| `relaycfg` | Host, puerto, token, TLS del relay |
 
-```
-setup() → inicialización → provisioning o conexión WiFi
-loop()  → server.handleClient()
-        → webSocket.loop()
-        → checkScheduler()
-        → mqttLoop()
-        → relayLoop()
-        → checkResetButton()
-        → checkSerialReset()
-```
-
-Todos los objetos son **globales directos** (sin `new`, sin punteros nulos, sin `xTaskCreatePinnedToCore`). Esto es crítico para la estabilidad en el ESP32-S3.
+Un reset total borra todos los namespaces.
 
 ---
 
-## Nota de portabilidad WROOM → S3
+## Arquitectura del firmware
 
-La única diferencia funcional entre la versión WROOM y esta versión S3 es la tabla de pines. Los GPIOs 6-11 (bus flash) y 22-24 (internos) del S3 fueron reemplazados por GPIO 1, 3, 7, 8, 9. Toda la lógica de control, UI, API y persistencia es idéntica.
+```
+setup()
+  ├─ memset pinState / users / sessions / sched / hist
+  ├─ loadConfig()          → WiFi, usuarios, timezone
+  ├─ loadNames()           → nombres de pines
+  ├─ loadSched()           → eventos scheduler
+  ├─ restoreGPIOState()    → aplica físicamente el estado de cada pin
+  └─ connectWiFi / startNormalMode / mqttInit / relayInit / registerOTARoutes
+
+loop()
+  ├─ server.handleClient()
+  ├─ webSocket.loop()
+  ├─ checkScheduler()
+  ├─ mqttLoop()
+  ├─ relayLoop()
+  ├─ checkResetButton()
+  └─ checkSerialReset()
+```
+
+Sin FreeRTOS, sin `xTaskCreatePinnedToCore`, sin punteros dinámicos. Objetos globales directos — crítico para estabilidad en ESP32-S3.
+
+---
+
+## Historial de versiones
+
+| Versión | Cambios |
+|---------|---------|
+| v1.0 | Port WROOM → ESP32-S3, tabla de pines S3, módulo Relay WebSocket |
+| v1.1 | Restauración de estado GPIO tras power-off, clearAllConfig completo |
+| v2.0 | OTA por navegador (Update.h), partición Minimal SPIFFS |
 
 ---
 
 ## Próximas versiones
 
-- **QR P2P estilo Dahua** — generación de QR con Device ID en pantalla web para emparejamiento desde app Android sin configuración manual
-- **Restauración de estado GPIO al encender** — los pines con OUTPUT activo se restauran físicamente tras un power-off
-- **OTA por navegador** — actualización de firmware sin cable desde la interfaz web
+- **QR P2P estilo Dahua** — generación de QR con Device ID para emparejamiento desde app Android
 
 ---
 
