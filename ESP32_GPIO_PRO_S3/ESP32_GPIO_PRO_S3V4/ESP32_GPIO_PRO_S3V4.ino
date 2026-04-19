@@ -4382,7 +4382,7 @@ bool relayConnect(){
   if(!relayEnabled) return false;
   if(relayConnected) return true;
   if(WiFi.status()!=WL_CONNECTED) return false;
-  String path="/ws?id="+relayDeviceId+"&role=device";
+  String path="/ws?id="+relayDeviceId+"&role=device&token="+String(relayCfg.token);
   Serial.printf("[RELAY] Conectando a %s:%d%s\n",relayCfg.host,relayCfg.port,path.c_str());
   wsRelay.onEvent(relayWebSocketEvent);
   wsRelay.setReconnectInterval(RELAY_RETRY_MS);
