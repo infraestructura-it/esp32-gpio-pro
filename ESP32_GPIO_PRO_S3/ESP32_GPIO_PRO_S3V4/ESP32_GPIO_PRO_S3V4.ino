@@ -4247,13 +4247,14 @@ void relayOnMessage(uint8_t* payload, size_t len){
     String response = "";
     int    status   = 200;
 
-    // Verificar token
-    Session* sess = findSession(token);
-    if(!sess){
-      response = "{"error":"No autorizado"}";
-      status   = 401;
+    // Verificar token (excepto para login)
+    bool isLogin = (strcmp(path,"/api/login")==0 && strcmp(method,"POST")==0);
+    Session* sess = isLogin ? nullptr : findSession(token);
+    if(!isLogin && !sess){
+      DynamicJsonDocument er(64); er["error"]="No autorizado";
+      serializeJson(er,response); status=401;
     } else {
-      // Routing interno simplificado para proxy
+      // Routing interno para proxy
       if(strcmp(path,"/api/info")==0){
         DynamicJsonDocument res(512);
         res["ok"]=true; res["ip"]=deviceIP;
@@ -4264,16 +4265,26 @@ void relayOnMessage(uint8_t* payload, size_t len){
       } else if(strcmp(path,"/api/state")==0){
         response = buildStateJSON();
       } else if(strcmp(path,"/api/history")==0){
-        response = buildHistJSON();
-      } else if(strcmp(path,"/api/login")==0 && strcmp(method,"POST")==0){
+        // Construir historial inline
+        DynamicJsonDocument hdoc(4096); hdoc["ok"]=true;
+        JsonArray arr=hdoc.createNestedArray("history");
+        for(int i=0;i<histCount;i++){
+          int idx=(histHead-histCount+i+MAX_HIST)%MAX_HIST;
+          JsonObject h=arr.createNestedObject();
+          h["time"]=hist[idx].time; h["pin"]=hist[idx].pin;
+          h["mode"]=hist[idx].mode; h["value"]=hist[idx].value;
+          h["name"]=hist[idx].name; h["user"]=hist[idx].user;
+        }
+        serializeJson(hdoc,response);
+      } else if(isLogin){
         // Login via proxy
         DynamicJsonDocument bd(256);
         if(!deserializeJson(bd,body)){
           const char* usr = bd["user"]|""; const char* pwd = bd["pass"]|"";
           int ui = findUser(usr);
           if(ui>=0 && strlen(pwd)>0){
-            // Crear sesión
-            String tok = createToken();
+            String tok = genToken();
+            bool saved=false;
             for(int i=0;i<3;i++){
               if(!sessions[i].active){
                 strncpy(sessions[i].token,tok.c_str(),TOKEN_LEN);
@@ -4285,14 +4296,24 @@ void relayOnMessage(uint8_t* payload, size_t len){
                 res["ok"]=true; res["token"]=tok;
                 res["role"]=String(users[ui].role);
                 res["user"]=String(usr);
-                serializeJson(res,response); break;
+                serializeJson(res,response); saved=true; break;
               }
             }
-            if(response.isEmpty()){response="{"error":"Sin slots"}";status=503;}
-          } else { response="{"error":"Credenciales incorrectas"}";status=401; }
-        } else { response="{"error":"JSON invalido"}";status=400; }
+            if(!saved){
+              DynamicJsonDocument er(64); er["error"]="Sin slots";
+              serializeJson(er,response); status=503;
+            }
+          } else {
+            DynamicJsonDocument er(64); er["error"]="Credenciales incorrectas";
+            serializeJson(er,response); status=401;
+          }
+        } else {
+          DynamicJsonDocument er(64); er["error"]="JSON invalido";
+          serializeJson(er,response); status=400;
+        }
       } else {
-        response="{"error":"Endpoint no soportado via proxy"}"; status=404;
+        DynamicJsonDocument er(64); er["error"]="Endpoint no soportado via proxy";
+        serializeJson(er,response); status=404;
       }
     }
 
