@@ -4125,8 +4125,7 @@ void wsHandleControl(DynamicJsonDocument& doc, const char* src, uint8_t client){
 
   // ── PING ─────────────────────────────────────────────────────────────
   }else if(strcmp(cmd,"PING")==0){
-    if(strcmp(src,"relay")==0) wsRelay.sendTXT("{"type":"PONG"}");
-    else webSocket.sendTXT(client,"{"type":"PONG"}");
+    {const char* pg="{\"type\":\"PONG\"}"; if(strcmp(src,"relay")==0) wsRelay.sendTXT(pg); else webSocket.sendTXT(client,pg);}
 
   // ── MODE — cambiar modo del pin ───────────────────────────────────────
   }else if(strcmp(cmd,"mode")==0 && idx>=0){
